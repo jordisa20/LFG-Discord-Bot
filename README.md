@@ -58,19 +58,24 @@ Once created, the bot posts an embedded message in a queue channel where others 
 ```bash
 git clone https://github.com/yourusername/discord-lfg-bot.git
 cd discord-lfg-bot  
+```
 
 ### 2. Install dependencies  
+```bash
 npm install  
+```
 
 ### 3. Create .env file  
+```bash
 DISCORD_TOKEN=your_bot_token  
 CLIENT_ID=your_application_id  
 GUILD_ID=your_server_id  
 QUEUE_CHANNEL_ID=your_queue_channel_id  
+```
 
 ### 4. Run the bot  
+```bash
 node index.js  
-
 ```
 
 ## Deployment
