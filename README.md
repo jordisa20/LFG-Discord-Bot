@@ -71,7 +71,12 @@ DISCORD_TOKEN=your_bot_token
 CLIENT_ID=your_application_id  
 GUILD_ID=your_server_id  
 QUEUE_CHANNEL_ID=your_queue_channel_id  
+DUO_ROLE_ID=optional_duo_role_id  
+TRIO_ROLE_ID=optional_trio_role_id  
+STACK5_ROLE_ID=optional_5stack_role_id  
 ```
+
+`DUO_ROLE_ID`, `TRIO_ROLE_ID`, and `STACK5_ROLE_ID` are optional but recommended. If provided, the bot will mention those exact roles instead of relying on role-name matching.
 
 ### 4. Run the bot  
 ```bash

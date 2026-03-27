@@ -19,6 +19,10 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const QUEUE_CHANNEL_ID = process.env.QUEUE_CHANNEL_ID;
+const DELETE_ON_CLOSE = (process.env.DELETE_ON_CLOSE || 'true').toLowerCase() === 'true';
+const DUO_ROLE_ID = process.env.DUO_ROLE_ID || '';
+const TRIO_ROLE_ID = process.env.TRIO_ROLE_ID || '';
+const STACK5_ROLE_ID = process.env.STACK5_ROLE_ID || process.env.FIVESTACK_ROLE_ID || '';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !QUEUE_CHANNEL_ID) {
   console.error('Missing required values in .env');
@@ -121,6 +125,75 @@ function modeNeedsRank(mode) {
   return mode === 'Competitive' || mode === 'Premier';
 }
 
+function getRoleNameForType(type) {
+  if (type === 'duo') return 'duo';
+  if (type === 'trio') return 'trio';
+  if (type === '5stack') return '5stack';
+  return '';
+}
+
+function getRoleIdForType(type) {
+  if (type === 'duo') return DUO_ROLE_ID;
+  if (type === 'trio') return TRIO_ROLE_ID;
+  if (type === '5stack') return STACK5_ROLE_ID;
+  return '';
+}
+
+function normalizeRoleName(input) {
+  return (input || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function getRoleAliasesForType(type) {
+  if (type === 'duo') return ['duo'];
+  if (type === 'trio') return ['trio'];
+  if (type === '5stack') return ['5stack', '5 stack', '5-stack', '5s'];
+  return [];
+}
+
+async function resolveRoleForType(guild, type) {
+  const roleName = getRoleNameForType(type);
+  const configuredRoleId = getRoleIdForType(type);
+
+  if (!roleName) {
+    return null;
+  }
+
+  await guild.roles.fetch();
+
+  if (configuredRoleId) {
+    const byId = guild.roles.cache.get(configuredRoleId);
+    if (byId) return byId;
+  }
+
+  const aliases = getRoleAliasesForType(type).map(normalizeRoleName);
+  const aliasSet = new Set(aliases);
+
+  const byAlias = guild.roles.cache.find((role) =>
+    aliasSet.has(normalizeRoleName(role.name))
+  );
+
+  if (byAlias) {
+    return byAlias;
+  }
+
+  return guild.roles.cache.find(
+    (role) => role.name.toLowerCase() === roleName.toLowerCase()
+  ) || null;
+}
+
+function getRoleMention(type, roleId) {
+  return roleId ? `<@&${roleId}>` : `@${getRoleNameForType(type) || getTypeLabel(type)}`;
+}
+
+function getTypeDisplay(post) {
+  if (post.roleId) {
+    return `<@&${post.roleId}>`;
+  }
+
+  const roleName = post.roleName || getRoleNameForType(post.type);
+  return roleName ? `@${roleName}` : getTypeLabel(post.type);
+}
+
 function buildTypeMenu(userId) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -157,21 +230,26 @@ function buildRankMenu(userId) {
   );
 }
 
-function buildButtons(ownerId, isFull = false) {
+function buildButtons(ownerId, state = 'open') {
+  const isFull = state === 'full';
+  const isClosed = state === 'closed';
+
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`lfg_join_${ownerId}`)
-      .setLabel(isFull ? 'Full' : 'Join')
+      .setLabel(isClosed ? 'Closed' : isFull ? 'Full' : 'Join')
       .setStyle(ButtonStyle.Primary)
-      .setDisabled(isFull),
+      .setDisabled(isFull || isClosed),
     new ButtonBuilder()
       .setCustomId(`lfg_leave_${ownerId}`)
       .setLabel('Leave')
-      .setStyle(ButtonStyle.Secondary),
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(isClosed),
     new ButtonBuilder()
       .setCustomId(`lfg_close_${ownerId}`)
-      .setLabel('Close')
+      .setLabel(isClosed ? 'Closed' : 'Close')
       .setStyle(ButtonStyle.Danger)
+      .setDisabled(isClosed)
   );
 }
 
@@ -183,7 +261,7 @@ function buildEmbed(ownerId, post) {
 
   const lines = [
     `**Host:** <@${ownerId}>`,
-    `**Type:** ${getTypeLabel(post.type)}`,
+    `**Type:** ${getTypeDisplay(post)}`,
     `**Region:** ${post.region}`,
     `**Mode:** ${post.mode}`,
   ];
@@ -192,17 +270,28 @@ function buildEmbed(ownerId, post) {
     lines.push(`**Rank:** ${post.rank}`);
   }
 
-  lines.push(
-    `**Players:** ${post.joinedUserIds.length}/${maxPlayers}`,
-    `**Status:** ${isFull ? 'Full' : `${spotsLeft} spot${spotsLeft === 1 ? '' : 's'} left`}`,
-    `**Members:** ${joinedMentions}`
-  );
+  if (post.isClosed) {
+    lines.push(
+      `**Status:** Closed`,
+      `**Members:** ${joinedMentions}`
+    );
+  } else {
+    lines.push(
+      `**Players:** ${post.joinedUserIds.length}/${maxPlayers}`,
+      `**Status:** ${isFull ? 'Full' : `${spotsLeft} spot${spotsLeft === 1 ? '' : 's'} left`}`,
+      `**Members:** ${joinedMentions}`
+    );
+  }
 
   return new EmbedBuilder()
-    .setTitle('🎮 Looking For Group')
+    .setTitle(post.isClosed ? '🔒 LFG Closed' : '🎮 Looking For Group')
     .setDescription(lines.join('\n'))
     .setFooter({
-      text: isFull ? 'This group is full.' : 'Use the buttons below to join or leave.',
+      text: post.isClosed
+        ? 'This group has been closed.'
+        : isFull
+          ? 'This group is full.'
+          : 'Use the buttons below to join or leave.',
     })
     .setTimestamp();
 }
@@ -223,6 +312,7 @@ async function createLfgPost(interaction, type, region, mode, rank = 'N/A') {
     embedLinks: perms?.has('EmbedLinks'),
     readMessageHistory: perms?.has('ReadMessageHistory'),
     manageMessages: perms?.has('ManageMessages'),
+    mentionEveryone: perms?.has('MentionEveryone'),
   });
 
   if (
@@ -247,16 +337,55 @@ async function createLfgPost(interaction, type, region, mode, rank = 'N/A') {
     messageId: null,
     queueChannelId: queueChannel.id,
     joinedUserIds: [interaction.user.id],
+    roleId: null,
+    roleName: null,
     type,
     region,
     mode,
     rank,
+    isClosed: false,
   };
 
+  const role = await resolveRoleForType(interaction.guild, type);
+  const roleId = role?.id || null;
+  const roleName = role?.name || getRoleNameForType(type) || null;
+  postData.roleId = roleId;
+  postData.roleName = roleName;
+
+  const roleMention = getRoleMention(type, roleId);
+  const pingContent = roleId
+    ? `${roleMention} Someone is looking to queue!`
+    : `${roleMention} Someone is looking to queue!`;
+
   const sentMessage = await queueChannel.send({
+    content: pingContent,
     embeds: [buildEmbed(interaction.user.id, postData)],
-    components: [buildButtons(interaction.user.id, false)],
+    components: [buildButtons(interaction.user.id, 'open')],
+    allowedMentions: roleId ? { roles: [roleId] } : { parse: [] },
   });
+
+  const followUpLine = roleId
+    ? `<@${interaction.user.id}> is looking for ${roleMention} for ${mode}.`
+    : `<@${interaction.user.id}> is looking for ${getTypeLabel(type)} for ${mode}.`;
+
+  const followUpPayload = {
+    content: followUpLine,
+    allowedMentions: roleId
+      ? { users: [interaction.user.id], roles: [roleId] }
+      : { users: [interaction.user.id], parse: [] },
+  };
+
+  // Keep LFG creation successful even if the secondary ping fails.
+  try {
+    await sentMessage.reply(followUpPayload);
+  } catch (replyErr) {
+    console.log('Follow-up reply failed, trying channel send:', replyErr.message);
+    try {
+      await queueChannel.send(followUpPayload);
+    } catch (sendErr) {
+      console.log('Follow-up ping message failed:', sendErr.message);
+    }
+  }
 
   postData.messageId = sentMessage.id;
   activePosts.set(interaction.user.id, postData);
@@ -285,11 +414,18 @@ async function refreshPost(ownerId) {
   const channel = await client.channels.fetch(post.queueChannelId);
   const msg = await channel.messages.fetch(post.messageId);
 
-  const isFull = post.joinedUserIds.length >= getMaxPlayers(post.type);
+  let state = 'open';
+  if (post.isClosed) {
+    state = 'closed';
+  } else if (post.joinedUserIds.length >= getMaxPlayers(post.type)) {
+    state = 'full';
+  }
 
   await msg.edit({
+    content: msg.content || undefined,
     embeds: [buildEmbed(ownerId, post)],
-    components: [buildButtons(ownerId, isFull)],
+    components: [buildButtons(ownerId, state)],
+    allowedMentions: { parse: [] },
   });
 }
 
@@ -439,6 +575,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      if (post.isClosed) {
+        await interaction.reply({
+          content: 'That LFG post is closed.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
       const maxPlayers = getMaxPlayers(post.type);
 
       if (post.joinedUserIds.includes(interaction.user.id)) {
@@ -474,6 +618,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!post) {
         await interaction.reply({
           content: 'That LFG post is no longer active.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (post.isClosed) {
+        await interaction.reply({
+          content: 'That LFG post is already closed.',
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -527,12 +679,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const channel = await client.channels.fetch(post.queueChannelId);
       const msg = await channel.messages.fetch(post.messageId);
-      await msg.delete();
 
-      activePosts.delete(ownerId);
+      if (DELETE_ON_CLOSE) {
+        await msg.delete();
+        activePosts.delete(ownerId);
+
+        await interaction.reply({
+          content: 'Your LFG post was closed and deleted.',
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      post.isClosed = true;
+      await refreshPost(ownerId);
 
       await interaction.reply({
-        content: 'Your LFG post was closed.',
+        content: 'Your LFG post was marked as closed.',
         flags: MessageFlags.Ephemeral,
       });
       return;
